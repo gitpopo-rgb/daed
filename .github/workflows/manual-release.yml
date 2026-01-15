@@ -1,34 +1,52 @@
-name: Release Please
+name: Manual Release
 
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:  # ✅ 允许手动触发
-  
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号 (例如: v0.1.0)'
+        required: true
+        type: string
+      skip_screenshots:
+        description: '跳过截图更新'
+        required: false
+        type: boolean
+        default: false
+      skip_pages:
+        description: '跳过 GitHub Pages 发布'
+        required: false
+        type: boolean
+        default: false
+
 permissions:
   contents: write
   pull-requests: write
   pages: write
 
 jobs:
-  release-please:
-    runs-on: macos-latest
+  validate-version:
+    runs-on: ubuntu-latest
     outputs:
-      # Main package (apps/web - daed)
-      tag_name: ${{ steps.release.outputs['apps/web--tag_name'] }}
-      release_created: ${{ steps.release.outputs['apps/web--release_created'] }}
+      version: ${{ steps.validate.outputs.version }}
+      package_version: ${{ steps.validate.outputs.package_version }}
     steps:
-      - uses: googleapis/release-please-action@v4
-        id: release
-        if: ${{ github.event_name == 'push' }}
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate version format
+        id: validate
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+            echo "❌ 版本号格式错误! 应该是 vX.Y.Z 格式 (例如: v0.1.0)"
+            exit 1
+          fi
+          PACKAGE_VERSION="${VERSION:1}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "package_version=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+          echo "✅ 版本号验证通过: $VERSION"
 
-  # Update screenshots when a new release is created
+  # Update screenshots when manually triggered
   update-screenshots:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: validate-version
+    if: ${{ github.event.inputs.skip_screenshots != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -51,10 +69,10 @@ jobs:
 
       - uses: peter-evans/create-pull-request@v8
         with:
-          commit-message: 'chore: update screenshots for ${{ needs.release-please.outputs.tag_name }} [skip ci]'
-          title: 'chore: update screenshots for ${{ needs.release-please.outputs.tag_name }} [skip ci]'
+          commit-message: 'chore: update screenshots for ${{ needs.validate-version.outputs.version }} [skip ci]'
+          title: 'chore: update screenshots for ${{ needs.validate-version.outputs.version }} [skip ci]'
           body: |
-            Auto-generated screenshots update for ${{ needs.release-please.outputs.tag_name }}
+            Auto-generated screenshots update for ${{ needs.validate-version.outputs.version }}
 
             ## Desktop Screenshots
 
@@ -72,14 +90,13 @@ jobs:
           add-paths: docs/screenshots/
 
   checkout-full-src:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: validate-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.validate-version.outputs.version }}
 
       - uses: actions/setup-go@v6
         with:
@@ -108,13 +125,12 @@ jobs:
           path: daed-full-src.zip
 
   build-web:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: validate-version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.validate-version.outputs.version }}
 
       - uses: pnpm/action-setup@v4.2.0
 
@@ -133,10 +149,10 @@ jobs:
           name: web
           path: apps/web/dist
 
-  # Publish GitHub Pages when a new release is created
+  # Publish GitHub Pages when manually triggered
   publish-gh-pages:
-    needs: [release-please, build-web]
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: [validate-version, build-web]
+    if: ${{ github.event.inputs.skip_pages != 'true' }}
     runs-on: macos-latest
     steps:
       - uses: actions/download-artifact@v7
@@ -150,8 +166,7 @@ jobs:
           publish_dir: ./dist
 
   build-bundle:
-    needs: [release-please, build-web]
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: [validate-version, build-web]
     runs-on: ubuntu-latest
 
     strategy:
@@ -207,7 +222,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.validate-version.outputs.version }}
           fetch-depth: 0
           submodules: recursive
 
@@ -218,18 +233,13 @@ jobs:
 
       - run: go version
 
-      - name: Get the version
-        id: get_version
-        env:
-          REF: ${{ needs.release-please.outputs.tag_name }}
+      - name: Set version
+        id: set_version
         run: |
-          tag=${REF}
-          version=${tag}
-          package_version="${tag:1}"
-          echo "VERSION=$version" >> $GITHUB_OUTPUT
-          echo "VERSION=$version" >> $GITHUB_ENV
-          echo "PACKAGE_VERSION=$package_version" >> $GITHUB_OUTPUT
-          echo "PACKAGE_VERSION=$package_version" >> $GITHUB_ENV
+          echo "VERSION=${{ needs.validate-version.outputs.version }}" >> $GITHUB_OUTPUT
+          echo "VERSION=${{ needs.validate-version.outputs.version }}" >> $GITHUB_ENV
+          echo "PACKAGE_VERSION=${{ needs.validate-version.outputs.package_version }}" >> $GITHUB_OUTPUT
+          echo "PACKAGE_VERSION=${{ needs.validate-version.outputs.package_version }}" >> $GITHUB_ENV
 
       - name: Get the filename
         id: get_filename
@@ -252,7 +262,7 @@ jobs:
       - name: make
         run: |
           mkdir -p ./bundled/
-          export VERSION=${{ steps.get_version.outputs.VERSION }}
+          export VERSION=${{ steps.set_version.outputs.VERSION }}
           export GOFLAGS="-trimpath -modcacherw"
           export OUTPUT=bundled/${{ steps.get_filename.outputs.BUNDLE_NAME }}
           make
@@ -333,13 +343,12 @@ jobs:
             output_packages/*
 
   upload-release:
-    needs: [release-please, checkout-full-src, build-bundle]
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: [validate-version, checkout-full-src, build-bundle]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.validate-version.outputs.version }}
 
       - uses: actions/download-artifact@v7
         with:
@@ -399,11 +408,33 @@ jobs:
           echo "Show files are going to upload..."
           ls -lh | grep -E ".deb|.pkg.tar.zst|.rpm|.zip"
 
-      - name: Upload Release
+      - name: Create Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+          TAG_NAME: ${{ needs.validate-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          
+          echo "📦 Creating release for $TAG_NAME..."
+          
+          # Create release if it doesn't exist
+          if ! gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release create "$TAG_NAME" \
+              --title "Release $TAG_NAME" \
+              --notes "手动发布版本 $TAG_NAME" \
+              --draft=false \
+              --prerelease=false
+            echo "✅ Release $TAG_NAME created"
+          else
+            echo "ℹ️  Release $TAG_NAME already exists"
+          fi
+
+      - name: Upload Release Assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.validate-version.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -424,17 +455,18 @@ jobs:
 
           files=$(ls | grep -E "\.deb$|\.pkg\.tar\.zst$|\.rpm$|\.zip$|\.dgst$")
           parallel_exec upload_file $files
+          
+          echo "✅ All files uploaded successfully!"
 
-  # Publish container image when release is created
+  # Publish container image when manually triggered
   publish-container-image:
-    needs: [release-please, build-web]
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: [validate-version, build-web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.validate-version.outputs.version }}
 
       - uses: actions/download-artifact@v7
         with:
@@ -443,10 +475,8 @@ jobs:
 
       - name: Prepare Tag
         id: prep
-        env:
-          REF: ${{ needs.release-please.outputs.tag_name }}
         run: |
-          tag=${REF:1}
+          tag=${{ needs.validate-version.outputs.package_version }}
           echo "IMAGE=daeuniverse/daed" >> $GITHUB_OUTPUT
           echo "TAG=$tag" >> $GITHUB_OUTPUT
 
@@ -470,6 +500,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
 
       - uses: docker/build-push-action@v6
         with:
